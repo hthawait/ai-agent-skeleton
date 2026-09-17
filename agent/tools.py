@@ -20,6 +20,7 @@ from typing import Any, Callable
 from google.genai import types
 
 from agent.config import AgentConfig
+from agent.sql_agent import ask_database
 
 
 def _search_tool(query: str) -> str:
@@ -62,6 +63,19 @@ IMPLEMENTATIONS: dict[str, tuple[Callable[..., Any], dict[str, Any]]] = {
                 },
             },
             "required": ["expression"],
+        },
+    ),
+    "ask_database": (
+        ask_database,
+        {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "A natural-language question about PostgreSQL data",
+                },
+            },
+            "required": ["question"],
         },
     ),
 }

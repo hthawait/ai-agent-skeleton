@@ -12,6 +12,7 @@ ai-agent-skeleton/
 │   ├── config.py                 # loads all .md files
 │   ├── core.py                   # Agent class: message loop, tool dispatch
 │   ├── llm.py                    # thin Google Gemini (google-genai) wrapper
+│   ├── sql_agent.py              # LangChain PostgreSQL SQL agent
 │   └── tools.py                  # tool registry (schema + implementation)
 │
 ├── instructions/
@@ -25,6 +26,7 @@ ai-agent-skeleton/
 ├── tools/
 │   ├── search.md                 # tool description for the LLM <- logic
 │   └── calculator.md             # tool description for the LLM <- logic
+│   └── ask_database.md            # PostgreSQL query tool
 │
 ├── main.py                     # REPL entry point
 ├── requirements.txt
@@ -56,11 +58,21 @@ To change agent behavior, edit `.md` files — not Python.
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env   # fill in GOOGLE_API_KEY
+cp .env.example .env   # fill in both API and PostgreSQL settings
 python main.py
 ```
 
 Get a `GOOGLE_API_KEY` from [Google AI Studio](https://aistudio.google.com/apikey).
+
+Set `POSTGRES_DATABASE_URL` to a SQLAlchemy PostgreSQL URL, for example:
+
+```text
+postgresql+psycopg://user:password@localhost:5432/database_name
+```
+
+Questions about the database are routed to the LangChain SQL agent through the
+`ask_database` tool. The SQL agent is configured for read-only queries and is
+created lazily on the first database question.
 
 ## Adding a skill
 
