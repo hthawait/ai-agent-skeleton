@@ -37,8 +37,9 @@ class LLMClient:
             max_output_tokens=self.max_tokens,
             tools=tools or None,
         )
-        return self.client.models.generate_content(
+        chat = self.client.chats.create(
             model=self.model,
-            contents=contents,
             config=config,
+            history=contents[:-1],
         )
+        return chat.send_message(contents[-1].parts)

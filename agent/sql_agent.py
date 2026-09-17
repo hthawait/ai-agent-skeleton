@@ -3,56 +3,58 @@
 from __future__ import annotations
 
 import os
-from functools import lru_cache
+import re
+import logging
+import warnings
 from typing import Any
 
+from google import genai
+from google.genai import types
 
-@lru_cache(maxsize=4)
-def _build_sql_agent(
-    database_url: str, model: str, api_key: str, schema: str
-) -> Any:
-    """Build one SQL agent per database/model configuration."""
-    from langchain_community.agent_toolkits import SQLDatabaseToolkit, create_sql_agent
-    from langchain_community.utilities import SQLDatabase
-    from langchain_google_genai import ChatGoogleGenerativeAI
 
-    database = SQLDatabase.from_uri(database_url, schema=schema)
-    llm = ChatGoogleGenerativeAI(
+warnings.filterwarnings(
+    "ignore",
+    message="Direct use of automatic function calling.*",
+)
+logging.getLogger("google_genai.models").disabled = True
+
+
+def _schema_description(connection: Any, schema: str) -> str:
+    """Read the live table and column metadata for SQL generation."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT table_name, column_name, data_type "
+            "FROM information_schema.columns "
+            "WHERE table_schema = %s ORDER BY table_name, ordinal_position",
+            (schema,),
+        )
+        rows = cursor.fetchall()
+    return "\n".join(f"{table}.{column} ({data_type})" for table, column, data_type in rows)
+
+
+def _extract_sql(text: str) -> str:
+    """Extract one SQL statement from plain or fenced model output."""
+    match = re.search(r"```(?:sql)?\s*(.*?)```", text, re.IGNORECASE | re.DOTALL)
+    sql = match.group(1) if match else text
+    sql = sql.strip().rstrip(";").strip()
+    if ";" in sql or not re.match(r"^(SELECT|WITH)\b", sql, re.IGNORECASE):
+        raise ValueError("The model did not produce a single read-only SQL query.")
+    if re.search(
+        r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|TRUNCATE|CREATE|GRANT|REVOKE|CALL)\b",
+        sql,
+        re.IGNORECASE,
+    ):
+        raise ValueError("Only read-only SQL queries are allowed.")
+    return sql
+
+
+def _generate(client: Any, model: str, prompt: str) -> str:
+    response = client.models.generate_content(
         model=model,
-        temperature=0,
-        google_api_key=api_key,
+        contents=prompt,
+        config=types.GenerateContentConfig(temperature=0, max_output_tokens=2048),
     )
-    toolkit = SQLDatabaseToolkit(db=database, llm=llm)
-    return create_sql_agent(
-        llm=llm,
-        toolkit=toolkit,
-        agent_type="tool-calling",
-        verbose=False,
-        prefix=(
-            "You are a read-only PostgreSQL analyst. Never INSERT, UPDATE, "
-            "DELETE, DROP, ALTER, TRUNCATE, or modify database state. "
-            f"The active PostgreSQL schema is {schema!r}. Always inspect and "
-            "query tables in that schema, using schema-qualified names when "
-            "needed. Only answer using SQL queries and the data returned by "
-            "the database."
-        ),
-    )
-
-
-def _extract_output(result: Any) -> str:
-    """Convert plain or provider-structured agent output to readable text."""
-    output = result.get("output", result) if isinstance(result, dict) else result
-    if isinstance(output, str):
-        return output
-    if isinstance(output, list):
-        text_parts = [
-            item.get("text", "")
-            for item in output
-            if isinstance(item, dict) and isinstance(item.get("text"), str)
-        ]
-        if text_parts:
-            return "".join(text_parts)
-    return str(output)
+    return response.text or ""
 
 
 def ask_database(question: str) -> str:
@@ -70,9 +72,34 @@ def ask_database(question: str) -> str:
         return "Please provide a database question."
 
     try:
-        result = _build_sql_agent(database_url, model, api_key, schema).invoke(
-            {"input": question}
+        import psycopg
+        from psycopg import sql as psycopg_sql
+
+        client = genai.Client(api_key=api_key)
+        postgres_url = database_url.replace("postgresql+psycopg://", "postgresql://")
+        with psycopg.connect(postgres_url) as connection:
+            schema_info = _schema_description(connection, schema)
+            sql_prompt = (
+                "Write exactly one PostgreSQL read-only SQL query for the user's "
+                "question. Return SQL only, with no markdown. Use only the tables "
+                f"and columns listed below in schema {schema!r}.\n\n"
+                f"Schema:\n{schema_info}\n\nQuestion: {question}"
+            )
+            query = _extract_sql(_generate(client, model, sql_prompt))
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    psycopg_sql.SQL("SET search_path TO {}")
+                    .format(psycopg_sql.Identifier(schema))
+                )
+                cursor.execute("SET TRANSACTION READ ONLY")
+                cursor.execute(query)
+                columns = [description.name for description in cursor.description or []]
+                rows = cursor.fetchall()
+
+        result_prompt = (
+            "Answer the user's question using only these SQL results. Be concise. "
+            f"Question: {question}\nColumns: {columns}\nRows: {rows}"
         )
-        return _extract_output(result)
+        return _generate(client, model, result_prompt)
     except Exception as exc:  # noqa: BLE001 - return tool errors to the chat
         return f"Database query failed: {exc}"
