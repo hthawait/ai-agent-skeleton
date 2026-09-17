@@ -25,13 +25,29 @@ def _build_sql_agent(database_url: str, model: str, api_key: str) -> Any:
         llm=llm,
         toolkit=toolkit,
         agent_type="tool-calling",
-        verbose=False,
+        verbose=True,
         prefix=(
             "You are a read-only PostgreSQL analyst. Never INSERT, UPDATE, "
             "DELETE, DROP, ALTER, TRUNCATE, or modify database state. "
             "Only answer using SQL queries and the data returned by the database."
         ),
     )
+
+
+def _extract_output(result: Any) -> str:
+    """Convert plain or provider-structured agent output to readable text."""
+    output = result.get("output", result) if isinstance(result, dict) else result
+    if isinstance(output, str):
+        return output
+    if isinstance(output, list):
+        text_parts = [
+            item.get("text", "")
+            for item in output
+            if isinstance(item, dict) and isinstance(item.get("text"), str)
+        ]
+        if text_parts:
+            return "".join(text_parts)
+    return str(output)
 
 
 def ask_database(question: str) -> str:
@@ -51,6 +67,6 @@ def ask_database(question: str) -> str:
         result = _build_sql_agent(database_url, model, api_key).invoke(
             {"input": question}
         )
-        return str(result.get("output", result))
+        return _extract_output(result)
     except Exception as exc:  # noqa: BLE001 - return tool errors to the chat
         return f"Database query failed: {exc}"
